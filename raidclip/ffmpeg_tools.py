@@ -269,6 +269,26 @@ def build_fit_cmds(
     return [pass1, pass2]
 
 
+def build_frame_cmd(ffmpeg: str, src: str, dst_png: str, t: float, max_width: int = 1920) -> list[str]:
+    """指定時刻のフレームを PNG に書き出す。横幅が max_width を超える場合だけ縮小する。"""
+    return [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", fmt_time(t),
+        "-i", src,
+        "-frames:v", "1",
+        "-vf", f"scale=min(iw\\,{max_width}):-2",
+        dst_png,
+    ]
+
+
+def extract_frame(ffmpeg: str, src: str, dst_png: str, t: float, max_width: int = 1920) -> None:
+    subprocess.run(
+        build_frame_cmd(ffmpeg, src, dst_png, t, max_width),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=creation_flags(), check=True,
+    )
+
+
 def parse_progress_line(line: str) -> Optional[float]:
     """-progress の出力から処理済み秒数を取り出す。該当行でなければ None。"""
     line = line.strip()

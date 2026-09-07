@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 
 from raidclip import __version__
 from raidclip import ffmpeg_tools as ft
+from raidclip.annotate import AnnotateDialog
 
 SLIDER_SCALE = 1000  # スライダーはミリ秒単位
 
@@ -138,6 +139,8 @@ class MainWindow(QMainWindow):
         self.btn_frame_back.clicked.connect(lambda: self.seek_rel(-0.1))
         self.btn_frame_fwd = QPushButton("0.1秒 ▶")
         self.btn_frame_fwd.clicked.connect(lambda: self.seek_rel(0.1))
+        self.btn_frame = QPushButton("静止画に注釈 (S)")
+        self.btn_frame.clicked.connect(self.capture_frame)
         self.vol = QSlider(Qt.Horizontal)
         self.vol.setRange(0, 100)
         self.vol.setValue(60)
@@ -147,6 +150,7 @@ class MainWindow(QMainWindow):
                   self.btn_frame_fwd, self.btn_fwd):
             ctl.addWidget(w)
         ctl.addWidget(self.lbl_time, 1)
+        ctl.addWidget(self.btn_frame)
         ctl.addWidget(QLabel("音量"))
         ctl.addWidget(self.vol)
         v.addLayout(ctl)
@@ -235,6 +239,7 @@ class MainWindow(QMainWindow):
         act(["Right"], lambda: self.seek_rel(5))
         act(["Shift+Left", ","], lambda: self.seek_rel(-0.1))
         act(["Shift+Right", "."], lambda: self.seek_rel(0.1))
+        act(["S"], self.capture_frame)
         act(["Ctrl+O"], self.open_file)
         act(["Ctrl+S"], self.start_export)
 
@@ -410,9 +415,37 @@ class MainWindow(QMainWindow):
                   self.btn_go_in, self.btn_go_out, self.btn_preview,
                   self.ed_in, self.ed_out, self.slider):
             w.setEnabled(loaded)
+        self.btn_frame.setEnabled(loaded and self.ffmpeg is not None)
         self.btn_save.setEnabled(loaded and not busy and self.ffmpeg is not None)
         self.btn_open.setEnabled(not busy)
         self.btn_cancel.setEnabled(busy)
+
+    # ------------------------------------------------------------ 静止画
+    @Slot()
+    def capture_frame(self):
+        if not self.src or not self.ffmpeg:
+            return
+        self.player.pause()
+        t = self.current_sec()
+        tmp = os.path.join(tempfile.gettempdir(), f"raidclip_frame_{os.getpid()}.png")
+        try:
+            ft.extract_frame(self.ffmpeg, self.src, tmp, t)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "静止画の取得に失敗", str(e))
+            return
+        stem = Path(self.src).stem
+        stamp = clock(t).replace(":", "-").replace(".", "_")
+        default_save = str(Path(self.src).with_name(f"{stem}_{stamp}.png"))
+        try:
+            dlg = AnnotateDialog(tmp, default_save, self)
+        except ValueError as e:
+            QMessageBox.critical(self, "静止画の取得に失敗", str(e))
+            return
+        dlg.exec()
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------ 書き出し
     @Slot()

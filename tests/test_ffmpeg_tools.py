@@ -98,3 +98,16 @@ def test_default_output_path(tmp_path):
     assert ft.default_output_path(str(src)).endswith("raid_clip.mp4")
     (tmp_path / "raid_clip.mp4").write_bytes(b"")
     assert ft.default_output_path(str(src)).endswith("raid_clip2.mp4")
+
+
+def test_extract_frame(sample, tmp_path):
+    dst = tmp_path / "f.png"
+    ft.extract_frame(FFMPEG, str(sample), str(dst), 2.0)
+    assert dst.stat().st_size > 1000
+    with open(dst, "rb") as f:
+        assert f.read(8) == b"\x89PNG\r\n\x1a\n"
+
+
+def test_frame_cmd_caps_width():
+    cmd = ft.build_frame_cmd("ffmpeg", "a.mp4", "b.png", 1.0, max_width=1920)
+    assert "scale=min(iw\\,1920):-2" in cmd
