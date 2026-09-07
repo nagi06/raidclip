@@ -6,3 +6,4 @@ dist/
 ffmpeg/
 .pytest_cache/
 .venv/
+build.log
