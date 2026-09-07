@@ -8,8 +8,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QAction, QIcon, QKeySequence
+import traceback
+
+from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QPen
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -33,32 +35,148 @@ def clock(sec: float) -> str:
     return f"{m}:{s:04.1f}"
 
 
-class RangeSlider(QSlider):
-    """通常のスライダーに In/Out の帯を描き足したもの。"""
+class TrimBar(QWidget):
+    """再生位置と切り出し範囲 (開始・終了ハンドル) を 1 本のバーで扱う。
+
+    - 開始 / 終了ハンドルをドラッグすると範囲が変わり、同時にその位置へシークする
+    - ハンドル以外をクリック / ドラッグすると再生位置が動く
+    """
+
+    seekRequested = Signal(int)          # ms
+    rangeChanged = Signal(int, int)      # in_ms, out_ms
+
+    HANDLE_W = 12
+    MARGIN = 10
 
     def __init__(self, parent=None):
-        super().__init__(Qt.Horizontal, parent)
-        self.in_pos = 0
-        self.out_pos = 0
+        super().__init__(parent)
+        self.duration = 0
+        self.pos = 0
+        self.in_ms = 0
+        self.out_ms = 0
+        self.dragging: str | None = None  # "in" / "out" / "pos"
+        self.setMinimumHeight(44)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.PointingHandCursor)
 
-    def set_range_marks(self, in_ms: int, out_ms: int):
-        self.in_pos, self.out_pos = in_ms, out_ms
+    # ---- 状態
+    def set_duration(self, ms: int):
+        self.duration = max(0, ms)
         self.update()
 
-    def paintEvent(self, ev):
-        from PySide6.QtGui import QColor, QPainter
+    def set_position(self, ms: int):
+        self.pos = ms
+        self.update()
 
-        super().paintEvent(ev)
-        if self.maximum() <= 0 or self.out_pos <= self.in_pos:
-            return
-        w = self.width()
-        x1 = int(w * self.in_pos / self.maximum())
-        x2 = int(w * self.out_pos / self.maximum())
+    def set_range(self, in_ms: int, out_ms: int):
+        self.in_ms, self.out_ms = in_ms, out_ms
+        self.update()
+
+    def is_dragging(self) -> bool:
+        return self.dragging is not None
+
+    # ---- 座標変換
+    def _track(self) -> tuple[int, int]:
+        return self.MARGIN, max(1, self.width() - 2 * self.MARGIN)
+
+    def _x(self, ms: int) -> float:
+        x0, w = self._track()
+        if self.duration <= 0:
+            return x0
+        return x0 + w * min(max(0, ms), self.duration) / self.duration
+
+    def _ms(self, x: float) -> int:
+        x0, w = self._track()
+        if self.duration <= 0:
+            return 0
+        return int(min(max(0.0, (x - x0) / w), 1.0) * self.duration)
+
+    # ---- 描画
+    def paintEvent(self, ev):
+        from PySide6.QtGui import QColor, QPainter, QPolygonF
+
         p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        x0, w = self._track()
+        h = self.height()
+        track_y, track_h = 14, 12
+        # 全体
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(80, 160, 255, 90))
-        p.drawRect(x1, 0, max(2, x2 - x1), self.height())
+        p.setBrush(QColor(70, 70, 70))
+        p.drawRoundedRect(x0, track_y, w, track_h, 4, 4)
+        if self.duration > 0:
+            xi, xo = self._x(self.in_ms), self._x(self.out_ms)
+            # 選択範囲
+            p.setBrush(QColor(80, 160, 255))
+            p.drawRect(QRectF(xi, track_y, max(1.0, xo - xi), track_h))
+            # ハンドル (下向き三角 + 縦線)
+            hw = self.HANDLE_W
+            for x, kind in ((xi, "in"), (xo, "out")):
+                active = self.dragging == kind
+                p.setBrush(QColor(255, 220, 0) if active else QColor(230, 230, 230))
+                p.setPen(QPen(QColor(30, 30, 30), 1))
+                tri = QPolygonF([
+                    QPointF(x, track_y + track_h),
+                    QPointF(x - hw / 2, h - 4),
+                    QPointF(x + hw / 2, h - 4),
+                ])
+                p.drawPolygon(tri)
+                p.setPen(QPen(QColor(255, 255, 255), 2))
+                p.drawLine(QPointF(x, track_y - 4), QPointF(x, track_y + track_h))
+            # 再生位置
+            xp = self._x(self.pos)
+            p.setPen(QPen(QColor(255, 60, 60), 2))
+            p.drawLine(QPointF(xp, 2), QPointF(xp, track_y + track_h + 4))
         p.end()
+
+    # ---- 操作
+    def _hit(self, x: float) -> str:
+        if self.duration <= 0:
+            return "none"
+        tol = self.HANDLE_W
+        di = abs(x - self._x(self.in_ms))
+        do = abs(x - self._x(self.out_ms))
+        if di <= tol and di <= do:
+            return "in"
+        if do <= tol:
+            return "out"
+        return "pos"
+
+    def mousePressEvent(self, ev):
+        if ev.button() != Qt.LeftButton or self.duration <= 0:
+            return
+        self.dragging = self._hit(ev.position().x())
+        if self.dragging == "none":
+            self.dragging = None
+            return
+        self._apply(ev.position().x())
+
+    def mouseMoveEvent(self, ev):
+        if self.dragging:
+            self._apply(ev.position().x())
+        else:
+            kind = self._hit(ev.position().x()) if self.duration > 0 else "none"
+            self.setCursor(Qt.SizeHorCursor if kind in ("in", "out") else Qt.PointingHandCursor)
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self.dragging = None
+            self.update()
+
+    def _apply(self, x: float):
+        ms = self._ms(x)
+        if self.dragging == "in":
+            self.in_ms = min(ms, max(0, self.out_ms - 100))
+            self.rangeChanged.emit(self.in_ms, self.out_ms)
+            self.seekRequested.emit(self.in_ms)
+        elif self.dragging == "out":
+            self.out_ms = max(ms, min(self.duration, self.in_ms + 100))
+            self.rangeChanged.emit(self.in_ms, self.out_ms)
+            self.seekRequested.emit(self.out_ms)
+        else:
+            self.pos = ms
+            self.seekRequested.emit(ms)
+        self.update()
 
 
 class MainWindow(QMainWindow):
@@ -118,11 +236,10 @@ class MainWindow(QMainWindow):
         self.player.errorOccurred.connect(self._on_player_error)
         v.addWidget(self.video, 1)
 
-        # シーク
-        self.slider = RangeSlider()
-        self.slider.setRange(0, 0)
-        self.slider.sliderMoved.connect(self._on_slider_moved)
-        self.slider.sliderPressed.connect(lambda: self.player.pause())
+        # シーク + 範囲 (ハンドルをドラッグで開始・終了を指定)
+        self.slider = TrimBar()
+        self.slider.seekRequested.connect(self._on_seek_requested)
+        self.slider.rangeChanged.connect(self._on_range_dragged)
         v.addWidget(self.slider)
 
         ctl = QHBoxLayout()
@@ -156,7 +273,7 @@ class MainWindow(QMainWindow):
         v.addLayout(ctl)
 
         # 範囲
-        rng = QGroupBox("切り出し範囲 (I キー: 開始をここに / O キー: 終了をここに)")
+        rng = QGroupBox("切り出し範囲 (バーの▽をドラッグ / I キー: 開始をここに / O キー: 終了をここに)")
         rl = QHBoxLayout(rng)
         self.btn_set_in = QPushButton("開始 = 現在位置")
         self.btn_set_in.clicked.connect(self.set_in_here)
@@ -302,7 +419,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 再生
     def _on_duration(self, ms: int):
-        self.slider.setRange(0, max(0, ms))
+        self.slider.set_duration(max(0, ms))
         if self.info is None or self.info.duration <= 0:
             self.out_sec = ms / 1000
             if self.info:
@@ -311,8 +428,8 @@ class MainWindow(QMainWindow):
         self._refresh_marks()
 
     def _on_position(self, ms: int):
-        if not self.slider.isSliderDown():
-            self.slider.setValue(ms)
+        if not self.slider.is_dragging():
+            self.slider.set_position(ms)
         self.lbl_time.setText(f"{clock(ms / 1000)} / {clock(self.duration())}")
         # 「範囲を再生」中は終了位置で止める
         if self._preview_stop_at is not None and ms >= self._preview_stop_at:
@@ -321,8 +438,16 @@ class MainWindow(QMainWindow):
 
     _preview_stop_at: int | None = None
 
-    def _on_slider_moved(self, ms: int):
+    def _on_seek_requested(self, ms: int):
+        self._preview_stop_at = None
+        self.player.pause()
         self.player.setPosition(ms)
+        self.slider.set_position(ms)
+        self.lbl_time.setText(f"{clock(ms / 1000)} / {clock(self.duration())}")
+
+    def _on_range_dragged(self, in_ms: int, out_ms: int):
+        self.in_sec, self.out_sec = in_ms / 1000, out_ms / 1000
+        self._refresh_range_labels()
 
     def _on_player_error(self, err, msg):
         if err != QMediaPlayer.NoError:
@@ -405,7 +530,7 @@ class MainWindow(QMainWindow):
         self._refresh_marks()
 
     def _refresh_marks(self):
-        self.slider.set_range_marks(int(self.in_sec * 1000), int(self.out_sec * 1000))
+        self.slider.set_range(int(self.in_sec * 1000), int(self.out_sec * 1000))
 
     def _update_enabled(self):
         loaded = self.src is not None
@@ -602,7 +727,34 @@ class MainWindow(QMainWindow):
         super().closeEvent(ev)
 
 
+def _install_excepthook():
+    """落ちる代わりにエラーを表示し、exe の隣 (書けなければ TEMP) にログを残す。"""
+    def hook(exc_type, exc, tb):
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        log_path = None
+        for d in (Path(sys.executable).parent if getattr(sys, "frozen", False) else Path.cwd(),
+                  Path(tempfile.gettempdir())):
+            try:
+                log_path = d / "raidclip_error.log"
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(text + "\n")
+                break
+            except OSError:
+                log_path = None
+        try:
+            QMessageBox.critical(
+                None, "RaidClip エラー",
+                "内部エラーが発生しました。操作は続けられますが、結果が正しくない場合があります。\n\n"
+                + (f"ログ: {log_path}\n\n" if log_path else "")
+                + text[-1500:],
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    sys.excepthook = hook
+
+
 def main():
+    _install_excepthook()
     app = QApplication(sys.argv)
     app.setApplicationName("RaidClip")
     icon = Path(__file__).resolve().parent.parent / "assets" / "icon.ico"

@@ -244,7 +244,7 @@ class Canvas(QWidget):
             n = sum(1 for s in self.shapes if s.kind == "number") + 1
             self.push(Shape("number", [pt], QColor(self.color), self.pen_width, number=n))
             return
-        self.current = Shape(self.tool, [pt], QColor(self.color), self.width)
+        self.current = Shape(self.tool, [pt], QColor(self.color), self.pen_width)
         self.invalidate()
 
     def mouseMoveEvent(self, ev):
