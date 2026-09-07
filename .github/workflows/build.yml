@@ -35,15 +35,33 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - name: Build with PyInstaller
         run: pyinstaller --noconfirm RaidClip.spec
-      - name: Bundle ffmpeg (BtbN GPL build)
+      - name: Bundle ffmpeg (BtbN GPL build, fallback gyan.dev)
         shell: pwsh
         run: |
-          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
-          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          $urls = @(
+            "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip",
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          )
+          $ok = $false
+          foreach ($url in $urls) {
+            for ($i = 1; $i -le 3 -and -not $ok; $i++) {
+              try {
+                Write-Host "Downloading $url (try $i)"
+                Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip -MaximumRetryCount 2 -RetryIntervalSec 5
+                $ok = $true
+              } catch {
+                Write-Host "  failed: $($_.Exception.Message)"
+                Start-Sleep -Seconds 10
+              }
+            }
+            if ($ok) { break }
+          }
+          if (-not $ok) { throw "ffmpeg download failed from all sources" }
           Expand-Archive ffmpeg.zip -DestinationPath ffbuild
           New-Item -ItemType Directory -Force dist/RaidClip/ffmpeg | Out-Null
           Get-ChildItem ffbuild -Recurse -Include ffmpeg.exe,ffprobe.exe | Copy-Item -Destination dist/RaidClip/ffmpeg/
-          Get-ChildItem ffbuild -Recurse -Filter LICENSE.txt | Select-Object -First 1 | Copy-Item -Destination dist/RaidClip/ffmpeg/LICENSE-ffmpeg.txt
+          Get-ChildItem ffbuild -Recurse -Include LICENSE.txt,LICENSE | Select-Object -First 1 | Copy-Item -Destination dist/RaidClip/ffmpeg/LICENSE-ffmpeg.txt
+          if (-not (Test-Path dist/RaidClip/ffmpeg/ffmpeg.exe)) { throw "ffmpeg.exe not found in archive" }
           Copy-Item README.md dist/RaidClip/
       - name: Zip
         shell: pwsh
