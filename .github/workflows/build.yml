@@ -62,7 +62,7 @@ jobs:
           Get-ChildItem ffbuild -Recurse -Include ffmpeg.exe,ffprobe.exe | Copy-Item -Destination dist/RaidClip/ffmpeg/
           Get-ChildItem ffbuild -Recurse -Include LICENSE.txt,LICENSE | Select-Object -First 1 | Copy-Item -Destination dist/RaidClip/ffmpeg/LICENSE-ffmpeg.txt
           if (-not (Test-Path dist/RaidClip/ffmpeg/ffmpeg.exe)) { throw "ffmpeg.exe not found in archive" }
-          Copy-Item README.md dist/RaidClip/
+          Copy-Item README.md, LICENSE, THIRD_PARTY_LICENSES.md dist/RaidClip/
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path dist/RaidClip -DestinationPath RaidClip-windows.zip

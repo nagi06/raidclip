@@ -85,4 +85,4 @@ python -m pytest -q tests
 
 ## ライセンス
 
-MIT。同梱の ffmpeg は GPL ビルド (BtbN/FFmpeg-Builds) で、ライセンスは `ffmpeg/LICENSE-ffmpeg.txt` を参照。
+RaidClip 本体は MIT。同梱の ffmpeg は GPL v3、Qt (PySide6) は LGPL v3 で、詳細は `THIRD_PARTY_LICENSES.md` を参照。ffmpeg は外部プロセスとして呼び出しているだけなので、RaidClip 自体のライセンスには影響しません。
