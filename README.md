@@ -2,6 +2,14 @@
 
 レイドの録画 (mp4) から「ここからここまで」を選んで切り出し、Discord に上げやすいサイズで保存するだけの Windows 用アプリです。
 
+## ダウンロード
+
+**[最新版 RaidClip-windows.zip をダウンロード](https://github.com/nagi06/raidclip/releases/latest/download/RaidClip-windows.zip)**
+(すべての版: [Releases](https://github.com/nagi06/raidclip/releases))
+
+zip を展開して `RaidClip.exe` を起動するだけです。インストール不要、ffmpeg 同梱。
+初回起動時に Windows の SmartScreen が出た場合は「詳細情報」→「実行」で通ります。
+
 ## 使い方
 
 1. `RaidClip-windows.zip` を展開し、`RaidClip.exe` を起動する。
@@ -58,7 +66,7 @@ python raidclip.py
 ## exe を作る
 
 - GitHub Actions: `v0.1.0` のようなタグを push すると、ffmpeg 同梱の zip が Release に付きます。
-  Actions タブから手動実行 (workflow_dispatch) した場合は Artifacts に zip が出ます。
+  Actions タブから手動実行 (Run workflow) する場合は、`release_tag` にタグ名を入れると Release が作られ、空欄なら Artifacts に zip が出るだけです。
 - ローカル: `build.bat` を実行すると `dist\RaidClip\RaidClip.exe` ができます。ffmpeg を同梱したい場合は、先にリポジトリ直下の `ffmpeg\` フォルダに `ffmpeg.exe` と `ffprobe.exe` を置いてください。
 
 ## テスト
