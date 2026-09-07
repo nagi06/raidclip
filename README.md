@@ -56,7 +56,7 @@ python raidclip.py
 
 - GitHub Actions: `v0.1.0` のようなタグを push すると、ffmpeg 同梱の zip が Release に付きます。
   Actions タブから手動実行 (workflow_dispatch) した場合は Artifacts に zip が出ます。
-- ローカル: `build.bat` を実行すると `dist\RaidClip\RaidClip.exe` ができます。
+- ローカル: `build.bat` を実行すると `dist\RaidClip\RaidClip.exe` ができます。ffmpeg を同梱したい場合は、先にリポジトリ直下の `ffmpeg\` フォルダに `ffmpeg.exe` と `ffprobe.exe` を置いてください。
 
 ## テスト
 
