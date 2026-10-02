@@ -10,22 +10,22 @@ from pathlib import Path
 
 import traceback
 
-from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QPointF, QProcess, QRectF, QSettings, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QPen
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QGroupBox, QHBoxLayout, QLabel,
-    QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QGroupBox, QHBoxLayout,
+    QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QRadioButton, QSlider, QStyle, QVBoxLayout, QWidget,
 )
 
 from raidclip import __version__
 from raidclip import ffmpeg_tools as ft
 from raidclip.annotate import AnnotateDialog
-from raidclip.overlay import OverlayPlayer
 
 SLIDER_SCALE = 1000  # スライダーはミリ秒単位
+RATES = [("0.25x", 0.25), ("0.5x", 0.5), ("0.75x", 0.75), ("1x", 1.0), ("1.25x", 1.25), ("1.5x", 1.5)]
 
 
 def clock(sec: float) -> str:
@@ -197,7 +197,9 @@ class MainWindow(QMainWindow):
         self.pass_total = 1
         self.dst: str | None = None
         self._passlog: str | None = None
-        self.overlay: OverlayPlayer | None = None
+        self.settings = QSettings("RaidClip", "RaidClip")
+        self.pinned = False            # 最前面モード
+        self._normal_geometry = None   # 最前面モードに入る前の位置・サイズ
 
         self.ffmpeg = ft.find_binary("ffmpeg")
 
@@ -213,6 +215,7 @@ class MainWindow(QMainWindow):
         root = QWidget()
         self.setCentralWidget(root)
         v = QVBoxLayout(root)
+        self.root_layout = v
 
         # ファイル
         top = QHBoxLayout()
@@ -222,7 +225,9 @@ class MainWindow(QMainWindow):
         self.lbl_file.setTextInteractionFlags(Qt.TextSelectableByMouse)
         top.addWidget(self.btn_open)
         top.addWidget(self.lbl_file, 1)
-        v.addLayout(top)
+        self.row_top = QWidget()
+        self.row_top.setLayout(top)
+        v.addWidget(self.row_top)
 
         # プレビュー
         self.video = QVideoWidget()
@@ -236,6 +241,7 @@ class MainWindow(QMainWindow):
         self.player.durationChanged.connect(self._on_duration)
         self.player.playbackStateChanged.connect(lambda _s: self._update_play_icon())
         self.player.errorOccurred.connect(self._on_player_error)
+        self.player.mediaStatusChanged.connect(self._on_media_status)
         v.addWidget(self.video, 1)
 
         # シーク + 範囲 (ハンドルをドラッグで開始・終了を指定)
@@ -260,9 +266,20 @@ class MainWindow(QMainWindow):
         self.btn_frame_fwd.clicked.connect(lambda: self.seek_rel(0.1))
         self.btn_frame = QPushButton("静止画に注釈 (S)")
         self.btn_frame.clicked.connect(self.capture_frame)
-        self.btn_overlay = QPushButton("別窓で再生 (P)")
-        self.btn_overlay.setToolTip("常に最前面の小窓で再生する。ゲーム画面の上に重ねて見ながら練習する用")
-        self.btn_overlay.clicked.connect(self.open_overlay)
+        self.cb_loop = QCheckBox("範囲ループ")
+        self.cb_loop.setToolTip("開始〜終了を繰り返し再生する (L)")
+        self.cb_rate = QComboBox()
+        for name, _r in RATES:
+            self.cb_rate.addItem(name)
+        self.cb_rate.setCurrentIndex(3)
+        self.cb_rate.setToolTip("再生速度")
+        self.cb_rate.currentIndexChanged.connect(
+            lambda i: self.player.setPlaybackRate(RATES[i][1]))
+        self.btn_pin = QPushButton("最前面モード (P)")
+        self.btn_pin.setCheckable(True)
+        self.btn_pin.setToolTip("ウィンドウを常に最前面にし、編集パネルを畳んで小さくする。"
+                                "ゲーム画面の上に置いて見ながら練習する用")
+        self.btn_pin.toggled.connect(self.set_pinned)
         self.vol = QSlider(Qt.Horizontal)
         self.vol.setRange(0, 100)
         self.vol.setValue(60)
@@ -272,14 +289,18 @@ class MainWindow(QMainWindow):
                   self.btn_frame_fwd, self.btn_fwd):
             ctl.addWidget(w)
         ctl.addWidget(self.lbl_time, 1)
-        ctl.addWidget(self.btn_overlay)
+        ctl.addWidget(self.cb_loop)
+        ctl.addWidget(self.cb_rate)
+        ctl.addWidget(self.btn_pin)
         ctl.addWidget(self.btn_frame)
-        ctl.addWidget(QLabel("音量"))
+        self.lbl_vol = QLabel("音量")
+        ctl.addWidget(self.lbl_vol)
         ctl.addWidget(self.vol)
         v.addLayout(ctl)
 
         # 範囲
         rng = QGroupBox("切り出し範囲 (バーの▽をドラッグ / I キー: 開始をここに / O キー: 終了をここに)")
+        self.grp_range = rng
         rl = QHBoxLayout(rng)
         self.btn_set_in = QPushButton("開始 = 現在位置")
         self.btn_set_in.clicked.connect(self.set_in_here)
@@ -310,6 +331,7 @@ class MainWindow(QMainWindow):
 
         # 出力
         outg = QGroupBox("保存")
+        self.grp_out = outg
         ol = QVBoxLayout(outg)
         mode = QHBoxLayout()
         self.rb_copy = QRadioButton("高速 (無劣化・秒単位でずれる事あり)")
@@ -363,7 +385,8 @@ class MainWindow(QMainWindow):
         act(["Shift+Left", ","], lambda: self.seek_rel(-0.1))
         act(["Shift+Right", "."], lambda: self.seek_rel(0.1))
         act(["S"], self.capture_frame)
-        act(["P"], self.open_overlay)
+        act(["P"], self.btn_pin.toggle)
+        act(["L"], self.cb_loop.toggle)
         act(["Ctrl+O"], self.open_file)
         act(["Ctrl+S"], self.start_export)
 
@@ -407,8 +430,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "読み込み失敗", f"動画情報を取得できません:\n{e}")
             return
         self.src = path
-        if self.overlay is not None and self.overlay.isVisible():
-            self.overlay.close()
         self.player.stop()
         self.player.setSource(QUrl.fromLocalFile(path))
         dur = self.info.duration if self.info else 0.0
@@ -440,6 +461,10 @@ class MainWindow(QMainWindow):
         if not self.slider.is_dragging():
             self.slider.set_position(ms)
         self.lbl_time.setText(f"{clock(ms / 1000)} / {clock(self.duration())}")
+        # 範囲ループ中は終了位置で開始位置に戻す
+        if self._loop_active() and ms >= int(self.out_sec * 1000):
+            self.player.setPosition(int(self.in_sec * 1000))
+            return
         # 「範囲を再生」中は終了位置で止める
         if self._preview_stop_at is not None and ms >= self._preview_stop_at:
             self._preview_stop_at = None
@@ -458,6 +483,16 @@ class MainWindow(QMainWindow):
         self.in_sec, self.out_sec = in_ms / 1000, out_ms / 1000
         self._refresh_range_labels()
 
+    def _loop_active(self) -> bool:
+        return (self.cb_loop.isChecked()
+                and self.player.playbackState() == QMediaPlayer.PlayingState
+                and self.out_sec - self.in_sec >= 0.2)
+
+    def _on_media_status(self, status):
+        if status == QMediaPlayer.EndOfMedia and self.cb_loop.isChecked() and self.src:
+            self.player.setPosition(int(self.in_sec * 1000))
+            self.player.play()
+
     def _on_player_error(self, err, msg):
         if err != QMediaPlayer.NoError:
             self.lbl_status.setText(f"プレビュー再生エラー: {msg}（切り出し自体は可能です）")
@@ -474,6 +509,10 @@ class MainWindow(QMainWindow):
         if self.player.playbackState() == QMediaPlayer.PlayingState:
             self.player.pause()
         else:
+            if self.cb_loop.isChecked():
+                pos = self.current_sec()
+                if pos < self.in_sec or pos >= self.out_sec - 0.05:
+                    self.seek_to(self.in_sec)
             self.player.play()
 
     def _update_play_icon(self):
@@ -540,15 +579,14 @@ class MainWindow(QMainWindow):
 
     def _refresh_marks(self):
         self.slider.set_range(int(self.in_sec * 1000), int(self.out_sec * 1000))
-        if self.overlay is not None:
-            self.overlay.set_range(int(self.in_sec * 1000), int(self.out_sec * 1000))
 
     def _update_enabled(self):
         loaded = self.src is not None
         busy = self.proc is not None
         for w in (self.btn_play, self.btn_back, self.btn_fwd, self.btn_frame_back,
                   self.btn_frame_fwd, self.btn_set_in, self.btn_set_out,
-                  self.btn_go_in, self.btn_go_out, self.btn_preview, self.btn_overlay,
+                  self.btn_go_in, self.btn_go_out, self.btn_preview, self.btn_pin,
+                  self.cb_loop, self.cb_rate,
                   self.ed_in, self.ed_out, self.slider):
             w.setEnabled(loaded)
         self.btn_frame.setEnabled(loaded and self.ffmpeg is not None)
@@ -556,20 +594,42 @@ class MainWindow(QMainWindow):
         self.btn_open.setEnabled(not busy)
         self.btn_cancel.setEnabled(busy)
 
-    # ------------------------------------------------------------ 別窓再生
-    @Slot()
-    def open_overlay(self):
-        if not self.src:
+    # ------------------------------------------------------------ 最前面モード
+    @Slot(bool)
+    def set_pinned(self, on: bool):
+        """最前面 + 編集パネルを畳んだ小窓にする / 戻す。
+
+        再生は同じ 1 本のプレーヤーをそのまま使う (別窓・別デコーダは作らない)。
+        """
+        if on == self.pinned:
             return
-        self._preview_stop_at = None
-        self.player.pause()
-        if self.overlay is None:
-            self.overlay = OverlayPlayer()
-            if not self.windowIcon().isNull():
-                self.overlay.setWindowIcon(self.windowIcon())
-        self.overlay.open_media(
-            self.src, self.player.position(),
-            int(self.in_sec * 1000), int(self.out_sec * 1000), self.audio.volume())
+        self.pinned = on
+        if on:
+            self._normal_geometry = self.saveGeometry()
+            self.cb_loop.setChecked(True)
+        else:
+            self.settings.setValue("pinned/geometry", self.saveGeometry())
+        # 練習中に使わないものは畳んで、窓を小さくできるようにする
+        for w in (self.row_top, self.grp_range, self.grp_out,
+                  self.btn_frame_back, self.btn_frame_fwd,
+                  self.btn_frame, self.lbl_vol, self.vol):
+            w.setVisible(not on)
+        self.btn_pin.setText("最前面を解除 (P)" if on else "最前面モード (P)")
+        # 畳んだ直後は QMainWindow 側のレイアウトが古い最小サイズを覚えていて resize が押し返される
+        # ので、両方のレイアウトを先に再計算させる
+        self.root_layout.activate()
+        self.layout().activate()
+        # QWidget.setWindowFlag はネイティブ窓を作り直して位置・サイズが戻ってしまうので、
+        # QWindow 側でフラグだけ変える (Windows ではスタイル更新だけで済む)
+        self.windowHandle().setFlag(Qt.WindowStaysOnTopHint, on)
+        if on:
+            geo = self.settings.value("pinned/geometry")
+            if geo is None or not self.restoreGeometry(geo):
+                self.resize(640, 440)
+                scr = self.screen().availableGeometry()
+                self.move(scr.right() - self.width() - 20, scr.top() + 20)
+        elif self._normal_geometry is not None:
+            self.restoreGeometry(self._normal_geometry)
 
     # ------------------------------------------------------------ 静止画
     @Slot()
@@ -750,8 +810,8 @@ class MainWindow(QMainWindow):
                 return
             self.cancel_export()
         self.player.stop()
-        if self.overlay is not None:
-            self.overlay.shutdown()
+        if self.pinned:
+            self.settings.setValue("pinned/geometry", self.saveGeometry())
         super().closeEvent(ev)
 
 
