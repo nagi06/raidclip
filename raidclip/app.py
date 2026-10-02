@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 from raidclip import __version__
 from raidclip import ffmpeg_tools as ft
 from raidclip.annotate import AnnotateDialog
+from raidclip.overlay import OverlayPlayer
 
 SLIDER_SCALE = 1000  # スライダーはミリ秒単位
 
@@ -196,6 +197,7 @@ class MainWindow(QMainWindow):
         self.pass_total = 1
         self.dst: str | None = None
         self._passlog: str | None = None
+        self.overlay: OverlayPlayer | None = None
 
         self.ffmpeg = ft.find_binary("ffmpeg")
 
@@ -258,6 +260,9 @@ class MainWindow(QMainWindow):
         self.btn_frame_fwd.clicked.connect(lambda: self.seek_rel(0.1))
         self.btn_frame = QPushButton("静止画に注釈 (S)")
         self.btn_frame.clicked.connect(self.capture_frame)
+        self.btn_overlay = QPushButton("別窓で再生 (P)")
+        self.btn_overlay.setToolTip("常に最前面の小窓で再生する。ゲーム画面の上に重ねて見ながら練習する用")
+        self.btn_overlay.clicked.connect(self.open_overlay)
         self.vol = QSlider(Qt.Horizontal)
         self.vol.setRange(0, 100)
         self.vol.setValue(60)
@@ -267,6 +272,7 @@ class MainWindow(QMainWindow):
                   self.btn_frame_fwd, self.btn_fwd):
             ctl.addWidget(w)
         ctl.addWidget(self.lbl_time, 1)
+        ctl.addWidget(self.btn_overlay)
         ctl.addWidget(self.btn_frame)
         ctl.addWidget(QLabel("音量"))
         ctl.addWidget(self.vol)
@@ -357,6 +363,7 @@ class MainWindow(QMainWindow):
         act(["Shift+Left", ","], lambda: self.seek_rel(-0.1))
         act(["Shift+Right", "."], lambda: self.seek_rel(0.1))
         act(["S"], self.capture_frame)
+        act(["P"], self.open_overlay)
         act(["Ctrl+O"], self.open_file)
         act(["Ctrl+S"], self.start_export)
 
@@ -400,6 +407,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "読み込み失敗", f"動画情報を取得できません:\n{e}")
             return
         self.src = path
+        if self.overlay is not None and self.overlay.isVisible():
+            self.overlay.close()
         self.player.stop()
         self.player.setSource(QUrl.fromLocalFile(path))
         dur = self.info.duration if self.info else 0.0
@@ -531,19 +540,36 @@ class MainWindow(QMainWindow):
 
     def _refresh_marks(self):
         self.slider.set_range(int(self.in_sec * 1000), int(self.out_sec * 1000))
+        if self.overlay is not None:
+            self.overlay.set_range(int(self.in_sec * 1000), int(self.out_sec * 1000))
 
     def _update_enabled(self):
         loaded = self.src is not None
         busy = self.proc is not None
         for w in (self.btn_play, self.btn_back, self.btn_fwd, self.btn_frame_back,
                   self.btn_frame_fwd, self.btn_set_in, self.btn_set_out,
-                  self.btn_go_in, self.btn_go_out, self.btn_preview,
+                  self.btn_go_in, self.btn_go_out, self.btn_preview, self.btn_overlay,
                   self.ed_in, self.ed_out, self.slider):
             w.setEnabled(loaded)
         self.btn_frame.setEnabled(loaded and self.ffmpeg is not None)
         self.btn_save.setEnabled(loaded and not busy and self.ffmpeg is not None)
         self.btn_open.setEnabled(not busy)
         self.btn_cancel.setEnabled(busy)
+
+    # ------------------------------------------------------------ 別窓再生
+    @Slot()
+    def open_overlay(self):
+        if not self.src:
+            return
+        self._preview_stop_at = None
+        self.player.pause()
+        if self.overlay is None:
+            self.overlay = OverlayPlayer()
+            if not self.windowIcon().isNull():
+                self.overlay.setWindowIcon(self.windowIcon())
+        self.overlay.open_media(
+            self.src, self.player.position(),
+            int(self.in_sec * 1000), int(self.out_sec * 1000), self.audio.volume())
 
     # ------------------------------------------------------------ 静止画
     @Slot()
@@ -724,6 +750,8 @@ class MainWindow(QMainWindow):
                 return
             self.cancel_export()
         self.player.stop()
+        if self.overlay is not None:
+            self.overlay.shutdown()
         super().closeEvent(ev)
 
 
